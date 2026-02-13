@@ -1,0 +1,7 @@
+node_modules/
+auth/
+.env
+logs/
+monitors.json
+.wwebjs_cache/
+events/

@@ -1,0 +1,17 @@
+[Unit]
+Description=WhatsApp Service v2
+After=network.target
+
+[Service]
+Type=simple
+User=andrepaim
+WorkingDirectory=/home/andrepaim/.openclaw/workspace/wa-service-v2
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=PUPPETEER_CACHE_DIR=/home/andrepaim/.cache/puppeteer
+EnvironmentFile=-/home/andrepaim/.openclaw/workspace/wa-service-v2/.env
+
+[Install]
+WantedBy=multi-user.target
