@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+require('dotenv').config();
 const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcodeTerminal = require('qrcode-terminal');
@@ -16,6 +17,10 @@ const PORT = process.env.PORT || 3100;
 const API_TOKEN = process.env.WA_API_TOKEN || '';
 const MONITORS_FILE = path.join(__dirname, 'monitors.json');
 const LOGS_DIR = path.join(__dirname, 'logs');
+
+// Telegram instant notification
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || '';
+const TG_CHAT_ID = process.env.TG_CHAT_ID || '';
 
 process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || '/home/andrepaim/.cache/puppeteer';
 
@@ -111,6 +116,27 @@ client.on('disconnected', (reason) => {
 });
 
 // ---------------------------------------------------------------------------
+// Telegram instant notification
+// ---------------------------------------------------------------------------
+async function notifyTelegram(entry) {
+  if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+  try {
+    const sender = entry.pushName || entry.from.replace('@c.us', '').replace('@g.us', '');
+    const group = entry.isGroup ? ` (grupo: ${entry.chatName || '?'})` : '';
+    const body = (entry.body || '[mídia]').slice(0, 500);
+    const text = `📱 *WhatsApp*\nDe: ${sender}${group}\n\n${body}`;
+    const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
+    const payload = JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: 'Markdown' });
+    const req = require('https').request(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } });
+    req.on('error', (e) => console.error('[TG] Notification error:', e.message));
+    req.end(payload);
+    console.log(`[TG] Notified: ${sender} → "${body.slice(0, 60)}"`);
+  } catch (e) { console.error('[TG] Notification error:', e.message); }
+}
+
+// OpenClaw wake removed — using cron polling + Telegram notification instead
+
+// ---------------------------------------------------------------------------
 // Event queue for OpenClaw integration
 // ---------------------------------------------------------------------------
 const EVENTS_DIR = path.join(__dirname, 'events');
@@ -142,6 +168,9 @@ client.on('message', async (msg) => {
   // Always write to events file for OpenClaw to pick up
   fs.appendFileSync(EVENTS_FILE, JSON.stringify(entry) + '\n');
   console.log(`[Event] New message from ${entry.pushName || contactId}: ${(entry.body || '').slice(0, 80)}`);
+
+  // Instant Telegram notification
+  notifyTelegram(entry);
 
   // Monitor-specific logic
   const monitor = monitors[contactId];
