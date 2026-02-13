@@ -265,6 +265,42 @@ curl "localhost:3100/chats/120363001234567890@g.us/messages?limit=20"
 # → get messages → feed to LLM for summary
 ```
 
+### 🔗 OpenClaw Webhook Integration
+
+The bridge can automatically forward incoming WhatsApp messages to OpenClaw as webhook events for real-time AI processing.
+
+**How it works:**
+1. A WhatsApp message arrives at the bridge
+2. The bridge sends it as a POST to OpenClaw's `/hooks/agent` endpoint
+3. OpenClaw processes the message using configured routing rules
+4. The agent can reply on WhatsApp (via the bridge REST API) and/or notify on Telegram
+
+**Configuration:**
+
+Copy the example config and fill in your contacts:
+```bash
+cp hook-rules.json.example hook-rules.json
+```
+
+Edit `hook-rules.json` with your contacts, IDs, and preferences. The file is gitignored since it contains personal data.
+
+**Required OpenClaw config** (in your OpenClaw gateway settings):
+- `hooks.enabled: true`
+- `hooks.token` must match the `openclaw.hookToken` in your `hook-rules.json`
+
+**Routing rules system:**
+
+Each contact category in `hook-rules.json` defines:
+- `ids` — WhatsApp IDs belonging to this category
+- `action` — What to do when they message:
+  - `reply-and-notify` — Auto-reply on WhatsApp + notify owner on Telegram
+  - `notify-only` — Don't reply, just notify on Telegram
+  - `ignore` — Silently ignore (used for groups by default)
+- `style` — Response tone (`casual`, `professional`)
+- `context` — Extra instructions for the AI agent
+
+Default rules handle groups (ignore) and unknown contacts (notify-only). The `ignoreIds` array prevents the bridge from processing its own outgoing messages.
+
 ## Detailed Comparison with Official Channel
 
 ### Substitute or complement?

@@ -116,25 +116,106 @@ client.on('disconnected', (reason) => {
 });
 
 // ---------------------------------------------------------------------------
-// Telegram instant notification
+// OpenClaw webhook — load routing rules from hook-rules.json
 // ---------------------------------------------------------------------------
-async function notifyTelegram(entry) {
-  if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+const HOOK_RULES_FILE = path.join(__dirname, 'hook-rules.json');
+let hookRules;
+try {
+  hookRules = JSON.parse(fs.readFileSync(HOOK_RULES_FILE, 'utf8'));
+  console.log('[OC] Loaded hook-rules.json');
+} catch (e) {
+  console.error(`[OC] FATAL: Cannot load hook-rules.json: ${e.message}`);
+  console.error('[OC] Copy hook-rules.json.example to hook-rules.json and configure it.');
+  process.exit(1);
+}
+
+function buildContactDirectory(categories) {
+  const lines = [];
+  for (const [name, cat] of Object.entries(categories)) {
+    lines.push(`${name.toUpperCase()}:`);
+    if (cat.ids && cat.ids.length) cat.ids.forEach(id => lines.push(`  - ${id}`));
+    if (cat.matchName) lines.push(`  - (match contact name: ${cat.matchName})`);
+    if (cat.context) lines.push(`  Context: ${cat.context}`);
+  }
+  return lines.join('\n');
+}
+
+function buildRoutingRules(categories, defaults, tgChatId) {
+  const lines = [];
+  let i = 1;
+  for (const [name, cat] of Object.entries(categories)) {
+    const actionDesc = cat.action === 'reply-and-notify'
+      ? `Reply on WhatsApp (style: ${cat.style || 'default'}). ALWAYS notify on Telegram after.`
+      : cat.action === 'notify-only'
+      ? 'Do NOT reply on WhatsApp. Notify on Telegram with a brief summary.'
+      : `Action: ${cat.action}`;
+    lines.push(`${i}. ${name.toUpperCase()}: ${actionDesc}`);
+    i++;
+  }
+  if (defaults.groups?.action === 'ignore') {
+    lines.push(`${i}. GROUPS (isGroup=true): Do NOT reply. Do NOT notify. Reply NO_REPLY.`);
+    i++;
+  }
+  if (defaults.unknown?.action === 'notify-only') {
+    lines.push(`${i}. SPAM / UNKNOWN / PROMOTIONAL: Do NOT reply on WhatsApp. Notify on Telegram with a brief summary.`);
+    i++;
+  }
+  lines.push('');
+  lines.push(`== HOW TO NOTIFY ON TELEGRAM ==`);
+  lines.push(`Use the message tool: action=send, channel=telegram, target=${tgChatId}, message=your summary`);
+  return lines.join('\n');
+}
+
+async function notifyOpenClaw(entry) {
   try {
     const sender = entry.pushName || entry.from.replace('@c.us', '').replace('@g.us', '');
     const group = entry.isGroup ? ` (grupo: ${entry.chatName || '?'})` : '';
-    const body = (entry.body || '[mídia]').slice(0, 500);
-    const text = `📱 *WhatsApp*\nDe: ${sender}${group}\n\n${body}`;
-    const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-    const payload = JSON.stringify({ chat_id: TG_CHAT_ID, text, parse_mode: 'Markdown' });
-    const req = require('https').request(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } });
-    req.on('error', (e) => console.error('[TG] Notification error:', e.message));
-    req.end(payload);
-    console.log(`[TG] Notified: ${sender} → "${body.slice(0, 60)}"`);
-  } catch (e) { console.error('[TG] Notification error:', e.message); }
-}
+    const body = (entry.body || '[mídia]').slice(0, 1000);
+    const waId = entry.from;
+    const { categories, defaults } = hookRules.contacts;
+    const tgChatId = hookRules.telegram.chatId;
 
-// OpenClaw wake removed — using cron polling + Telegram notification instead
+    const message = [
+      `📱 WhatsApp message received:`,
+      `From: ${sender}${group}`,
+      `WA ID: ${waId}`,
+      `Type: ${entry.type || 'chat'}`,
+      entry.hasMedia ? `Has media: yes` : null,
+      ``,
+      `Message: ${body}`,
+      ``,
+      `== CONTACT DIRECTORY ==`,
+      buildContactDirectory(categories),
+      ``,
+      `== ROUTING RULES ==`,
+      buildRoutingRules(categories, defaults, tgChatId),
+      ``,
+      `== HOW TO REPLY ON WHATSAPP ==`,
+      `curl -s -X POST http://127.0.0.1:3100/send -H 'Content-Type: application/json' -d '{"to":"${waId}","message":"YOUR_REPLY"}'`,
+    ].filter(Boolean).join('\n');
+
+    const payload = JSON.stringify({
+      message,
+      name: 'WhatsApp',
+      sessionKey: `hook:wa:${waId}`,
+      wakeMode: 'now',
+      deliver: false,
+      timeoutSeconds: 120,
+    });
+
+    const req = http.request(hookRules.openclaw.hookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${hookRules.openclaw.hookToken}`,
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    });
+    req.on('error', (e) => console.error('[OC] Hook error:', e.message));
+    req.end(payload);
+    console.log(`[OC] Hook sent: ${sender} → "${body.slice(0, 60)}"`);
+  } catch (e) { console.error('[OC] Hook error:', e.message); }
+}
 
 // ---------------------------------------------------------------------------
 // Event queue for OpenClaw integration
@@ -146,8 +227,10 @@ fs.mkdirSync(EVENTS_DIR, { recursive: true });
 // Monitor incoming messages
 client.on('message', async (msg) => {
   if (!msg || !msg.from) return;
-  // Skip status broadcasts and own messages
+  // Skip status broadcasts, own messages, and Andre's own numbers
   if (msg.from === 'status@broadcast' || msg.fromMe) return;
+  // Only skip the bridge's own number (to avoid echo loops)
+  if (hookRules.ignoreIds.includes(msg.from)) return;
 
   const contactId = msg.from;
   const chat = await msg.getChat().catch(() => null);
@@ -169,8 +252,8 @@ client.on('message', async (msg) => {
   fs.appendFileSync(EVENTS_FILE, JSON.stringify(entry) + '\n');
   console.log(`[Event] New message from ${entry.pushName || contactId}: ${(entry.body || '').slice(0, 80)}`);
 
-  // Instant Telegram notification
-  notifyTelegram(entry);
+  // Instant OpenClaw webhook notification
+  notifyOpenClaw(entry);
 
   // Monitor-specific logic
   const monitor = monitors[contactId];
