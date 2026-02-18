@@ -18,6 +18,7 @@ OpenClaw has a [native WhatsApp channel](https://docs.openclaw.ai) that lets you
 | List chats, contacts, groups | ❌ | ✅ |
 | Download media from messages | ❌ | ✅ |
 | Monitor contacts with webhooks | ❌ | ✅ |
+| Event queue for polling-based integrations | ❌ | ✅ |
 | Send from any context (no cross-context limits) | ❌ | ✅ |
 
 **TL;DR:** Official channel = WhatsApp talks *to* the agent. Bridge = agent talks *to* WhatsApp.
@@ -27,12 +28,14 @@ They're **complementary in theory**, but WhatsApp only allows one web session pe
 ## Features
 
 - 📱 **WhatsApp Web connection** with persistent session (LocalAuth)
-- 🔌 **18 REST endpoints** for full WhatsApp interaction
+- 🔌 **20 REST endpoints** for full WhatsApp interaction
 - 🔍 **Search** messages globally or per chat
 - 👥 **Groups** — list, search, get info, send messages
 - 📡 **Contact monitoring** with webhook forwarding & keyword auto-reply
+- 📬 **Event queue** — JSONL-based incoming message queue for polling
+- 🔗 **OpenClaw webhook integration** — forward messages to OpenClaw for AI processing
+- 🔔 **Telegram notifications** — optional instant forwarding to Telegram
 - 🔒 **Bearer token auth** (optional)
-- 📋 **JSONL logging** of monitored messages
 - 🔄 **Auto-reconnect** on disconnection
 - 🛑 **Graceful shutdown** (SIGTERM/SIGINT)
 
@@ -61,8 +64,12 @@ cp .env.example .env
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | API server port | `3100` |
-| `WA_API_TOKEN` | Bearer token for API auth (optional) | — |
+| `WA_API_TOKEN` | Bearer token for API auth (optional, leave empty to disable) | — |
 | `PUPPETEER_CACHE_DIR` | Chromium cache directory | — |
+| `TG_BOT_TOKEN` | Telegram bot token for instant notifications (optional) | — |
+| `TG_CHAT_ID` | Telegram chat ID to receive notifications (optional) | — |
+
+When `TG_BOT_TOKEN` and `TG_CHAT_ID` are both set, incoming WhatsApp messages are instantly forwarded to your Telegram chat.
 
 ## Authentication
 
@@ -74,6 +81,22 @@ curl -H "Authorization: Bearer mysecret" http://127.0.0.1:3100/status
 ```
 
 Without the env var, no auth is required (localhost-only by default).
+
+## ⚠️ Important: Contact ID Formats
+
+WhatsApp uses different ID formats depending on the contact type. You'll encounter these in API responses:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `number@c.us` | `5511999999999@c.us` | Standard phone contact |
+| `number@lid` | `123456789012345@lid` | Linked ID (newer WhatsApp format) |
+| `number@g.us` | `120363001234567890@g.us` | Group chat |
+
+**LIDs (Linked IDs)** are WhatsApp's newer internal identifier format. Some contacts return LIDs instead of phone numbers. When sending messages, you can use:
+- A **phone number** (auto-appends `@c.us`): `"to": "5511999999999"`
+- A **full ID** (passed as-is): `"to": "123456789012345@lid"`
+
+**Tip:** Use `/contacts` or `/search` to discover the correct ID for a contact before sending.
 
 ## API Reference
 
@@ -91,6 +114,36 @@ curl localhost:3100/status
 curl localhost:3100/qr
 # {"qr":"data:image/png;base64,...","raw":"2@ABC..."}
 ```
+
+### 📬 Event Queue
+
+Incoming messages are logged to a JSONL file. Use these endpoints to poll for new messages:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/events` | Read all queued events and **flush** the queue |
+| `GET` | `/events/peek` | Read all queued events **without flushing** |
+
+```bash
+# Poll and consume events (queue is cleared after reading)
+curl localhost:3100/events
+
+# Peek at events without consuming them
+curl localhost:3100/events/peek
+```
+
+**Event format:**
+```json
+{
+  "from": "5511999999999@c.us",
+  "body": "Oi, tudo bem?",
+  "timestamp": 1707840000,
+  "chatName": "Andre",
+  "type": "chat"
+}
+```
+
+**`/events` vs `/events/peek`:** Use `/events` for cron-based polling (read once, process, done). Use `/events/peek` when you want to inspect without consuming (e.g., debugging).
 
 ### 💬 Chats & Messages
 
@@ -110,8 +163,8 @@ curl "localhost:3100/chats/5511999999999@c.us/messages?limit=50"
 # Search for "reunião" across all chats
 curl "localhost:3100/search?q=reunião&limit=10"
 
-# Search within a specific chat
-curl "localhost:3100/search?q=projeto&chatId=5511999999999@c.us&limit=10"
+# Search within a specific chat (works with LIDs too)
+curl "localhost:3100/search?q=projeto&chatId=123456789012345@lid&limit=10"
 ```
 
 **Message format:**
@@ -140,6 +193,8 @@ curl localhost:3100/contacts
 curl "localhost:3100/contacts/search?q=Andre"
 ```
 
+**Note:** Contact objects include both `id` (which may be a LID) and `number` fields. Use `id` for sending messages.
+
 ### 👥 Groups
 
 | Method | Endpoint | Description |
@@ -162,10 +217,15 @@ curl "localhost:3100/groups/120363001234567890@g.us/info"
 | `POST` | `/send-group` | `{groupId, message}` | Send to a group |
 
 ```bash
-# Send to a contact (number auto-appends @c.us)
+# Send to a contact using phone number
 curl -X POST localhost:3100/send \
   -H 'Content-Type: application/json' \
   -d '{"to":"5511999999999","message":"Fala, Andre!"}'
+
+# Send to a contact using LID
+curl -X POST localhost:3100/send \
+  -H 'Content-Type: application/json' \
+  -d '{"to":"123456789012345@lid","message":"Oi Sara!"}'
 
 # Send to a group
 curl -X POST localhost:3100/send-group \
@@ -233,9 +293,78 @@ horário=Funcionamos de 8h às 18h
 
 Monitored messages are also logged as JSONL files in `logs/`.
 
+## 🔗 OpenClaw Webhook Integration
+
+The bridge can automatically forward incoming WhatsApp messages to OpenClaw as webhook events for real-time AI processing.
+
+**How it works:**
+1. A WhatsApp message arrives at the bridge
+2. The bridge sends it as a POST to OpenClaw's `/hooks/agent` endpoint
+3. OpenClaw processes the message using configured routing rules
+4. The agent can reply on WhatsApp (via the bridge REST API) and/or notify on Telegram
+
+### Setup
+
+1. Copy the example config:
+```bash
+cp hook-rules.json.example hook-rules.json
+```
+
+2. Edit `hook-rules.json` with your contacts and preferences:
+```json
+{
+  "openclaw": {
+    "hookUrl": "http://127.0.0.1:18789/hooks/agent",
+    "hookToken": "your-hook-secret-here"
+  },
+  "ignoreIds": ["your-bridge-number@c.us"],
+  "contacts": {
+    "categories": {
+      "family": {
+        "ids": ["5511999999999@c.us", "123456789012345@lid"],
+        "action": "reply-and-notify",
+        "style": "casual"
+      },
+      "suppliers": {
+        "ids": ["5511777777777@c.us"],
+        "action": "reply-and-notify",
+        "style": "professional",
+        "context": "Check memory files for outreach scripts"
+      }
+    },
+    "defaults": {
+      "groups": { "action": "ignore" },
+      "unknown": { "action": "notify-only" }
+    }
+  },
+  "telegram": {
+    "chatId": "your-telegram-chat-id"
+  }
+}
+```
+
+3. Enable hooks in your OpenClaw gateway config:
+   - `hooks.enabled: true`
+   - `hooks.token` must match `openclaw.hookToken` above
+
+### Routing Actions
+
+| Action | Behavior |
+|--------|----------|
+| `reply-and-notify` | AI processes and replies on WhatsApp + notifies owner on Telegram |
+| `notify-only` | No reply, just forwards to Telegram |
+| `ignore` | Silently ignores (default for groups) |
+
+The `ignoreIds` array should include your own WhatsApp number to prevent the bridge from processing its own outgoing messages.
+
 ## Running as a Service (systemd)
 
+A sample systemd unit file is included. **Edit it to match your paths and user before installing:**
+
 ```bash
+# Review and edit the service file first!
+nano wa-service.service
+
 sudo cp wa-service.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable wa-service
@@ -248,58 +377,10 @@ sudo systemctl status wa-service
 sudo journalctl -u wa-service -f
 ```
 
-## Integration with OpenClaw
-
-This bridge is designed to work with [OpenClaw](https://github.com/openclaw/openclaw) as a WhatsApp backend. OpenClaw agents can call the REST API to:
-
-1. **Read conversations** — Summarize group chats, find specific messages
-2. **Send messages** — Reply to contacts or groups
-3. **Monitor contacts** — Watch for messages and auto-respond or forward
-4. **Search** — Find information across all WhatsApp history
-
-Example: An OpenClaw agent reading last 20 messages from a group and summarizing:
-```bash
-curl "localhost:3100/groups/search?q=Família"
-# → get group ID
-curl "localhost:3100/chats/120363001234567890@g.us/messages?limit=20"
-# → get messages → feed to LLM for summary
-```
-
-### 🔗 OpenClaw Webhook Integration
-
-The bridge can automatically forward incoming WhatsApp messages to OpenClaw as webhook events for real-time AI processing.
-
-**How it works:**
-1. A WhatsApp message arrives at the bridge
-2. The bridge sends it as a POST to OpenClaw's `/hooks/agent` endpoint
-3. OpenClaw processes the message using configured routing rules
-4. The agent can reply on WhatsApp (via the bridge REST API) and/or notify on Telegram
-
-**Configuration:**
-
-Copy the example config and fill in your contacts:
-```bash
-cp hook-rules.json.example hook-rules.json
-```
-
-Edit `hook-rules.json` with your contacts, IDs, and preferences. The file is gitignored since it contains personal data.
-
-**Required OpenClaw config** (in your OpenClaw gateway settings):
-- `hooks.enabled: true`
-- `hooks.token` must match the `openclaw.hookToken` in your `hook-rules.json`
-
-**Routing rules system:**
-
-Each contact category in `hook-rules.json` defines:
-- `ids` — WhatsApp IDs belonging to this category
-- `action` — What to do when they message:
-  - `reply-and-notify` — Auto-reply on WhatsApp + notify owner on Telegram
-  - `notify-only` — Don't reply, just notify on Telegram
-  - `ignore` — Silently ignore (used for groups by default)
-- `style` — Response tone (`casual`, `professional`)
-- `context` — Extra instructions for the AI agent
-
-Default rules handle groups (ignore) and unknown contacts (notify-only). The `ignoreIds` array prevents the bridge from processing its own outgoing messages.
+Key settings to customize in `wa-service.service`:
+- `User=` — your system username
+- `WorkingDirectory=` — path to the cloned repo
+- `EnvironmentFile=` — path to your `.env` file
 
 ## Detailed Comparison with Official Channel
 
