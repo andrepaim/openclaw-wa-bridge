@@ -220,12 +220,12 @@ curl "localhost:3100/groups/120363001234567890@g.us/info"
 # Send to a contact using phone number
 curl -X POST localhost:3100/send \
   -H 'Content-Type: application/json' \
-  -d '{"to":"5511999999999","message":"Fala, Andre!"}'
+  -d '{"to":"5511999999999","message":"Hello!"}'
 
 # Send to a contact using LID
 curl -X POST localhost:3100/send \
   -H 'Content-Type: application/json' \
-  -d '{"to":"123456789012345@lid","message":"Oi Sara!"}'
+  -d '{"to":"123456789012345@lid","message":"Hi there!"}'
 
 # Send to a group
 curl -X POST localhost:3100/send-group \
