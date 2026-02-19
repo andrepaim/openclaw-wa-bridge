@@ -6,3 +6,4 @@ monitors.json
 .wwebjs_cache/
 events/
 hook-rules.json
+outbox/*.json
