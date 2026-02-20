@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw WhatsApp Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=andrepaim
+WorkingDirectory=/path/to/openclaw-wa-bridge
+ExecStart=/usr/bin/node service/index.js
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+EnvironmentFile=-/path/to/openclaw-wa-bridge/.env
+
+[Install]
+WantedBy=multi-user.target
